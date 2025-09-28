@@ -1,10 +1,9 @@
 const std = @import("std");
-const buffalo = @import("buffalo");
+const Buffalo = @import("buffalo");
 
 pub fn main() !void {
-    var reader: buffalo.Reader = try .init([1400]u8, "build.zig");
-    var writer: buffalo.Writer = try .init([1400]u8, null);
-    defer reader.file.close();
-    _ = try reader.IO.stream(writer.IO, .unlimited);
-    _ = try writer.IO.flush();
+    var buffalo: Buffalo.Buffalo = try .init([8_400]u8, "build.zig", null);
+    // _ = try buffalo.reader.stream(buffalo.writer, .unlimited);
+    _ = try buffalo.writer.writeAll(buffalo.territory);
+    _ = try buffalo.writer.defaultFlush();
 }
