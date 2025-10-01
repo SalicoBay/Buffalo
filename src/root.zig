@@ -4,87 +4,168 @@ const std = @import("std");
 const Reader = struct {
     buf: []u8,
     IO: *std.Io.Reader,
-    inline fn init(comptime bufType: type, buf: bufType) !Reader {
-        var host = std.Io.Reader.fixed(buf);
-        var new = Reader{
+    inline fn init(str: []const u8) Reader {
+        var host = std.Io.Reader.fixed(str);
+        return Reader{
             .buf = host.buffer,
             .IO = &host,
         };
-        _ = &new;
-        return new;
-    }
-    pub fn clear(self: *Reader) void {
-        @memset(self.buf, ' ');
     }
 };
 
-pub const Writer = struct {
+const Writer = struct {
     buf: []u8,
     IO: *std.Io.Writer,
 
-    inline fn init(comptime bufType: type, buf: bufType) Writer {
+    inline fn init(comptime bufType: type, buf: *bufType) Writer {
         var outFile = std.fs.File.stdout();
         var host = outFile.writer(buf);
-        var new = Writer{
+        return Writer{
             .buf = host.interface.buffer,
             .IO = &host.interface,
         };
-        _ = &new;
-        return new;
+    }
+
+    inline fn initFileWriter(comptime bufType: type, buf: *bufType, filePath: []const u8) Writer {
+        var outFile = std.fs.cwd().createFile(filePath, .{}) catch {};
+        var host = outFile.writer(buf);
+        return Writer{
+            .buf = host.interface.buffer,
+            .IO = &host.interface,
+        };
     }
 };
 
 pub const Buffalo = struct {
-    block: []u8 = undefined,
-    boundary: usize = undefined,
-    reader: *Reader = undefined,
-    writer: *Writer = undefined,
+    buffer: []u8 = undefined,
+    count: usize = 0,
+    rider: *Writer = undefined,
 
-    pub inline fn init(comptime size: usize) !Buffalo {
-        var buf: [size]u8 = @splat(undefined);
-        const front = @TypeOf(buf[0 .. size / 2]);
-        const back = @TypeOf(buf[size / 2 .. size]);
-        var reader = try Reader.init(front, buf[0 .. size / 2]);
-        var writer = Writer.init(back, buf[size / 2 .. size]);
-
-        var new = Buffalo{
-            .block = &buf,
-            .boundary = buf.len / 2,
-            .reader = &reader,
-            .writer = &writer,
+    pub inline fn init(comptime size: usize) Buffalo {
+        var wBuf: [size]u8 = undefined;
+        var swapBuf: [size]u8 = undefined;
+        var writer = Writer.init(@TypeOf(wBuf), &wBuf);
+        return Buffalo{
+            .rider = &writer,
+            .buffer = &swapBuf,
         };
-
-        _ = &new;
-        return new;
     }
 
-    pub fn read(self: *Buffalo, str: []const u8) *Buffalo {
-        for (str, 0..) |c, i| {
-            self.reader.buf[i] = c;
-            self.reader.IO.seek += 1;
+    pub fn packThis(self: *Buffalo, str: []const u8, a: std.mem.Allocator) *Buffalo {
+        if (str.len > self.buffer.len) { // Total buffalo capacity is buffalo.pack.len * 2
+            return self.newPack(str.len * 2, a).pack(str);
         }
-        @memmove(self.writer.buf[self.writer.IO.end..self.writer.buf.len], self.reader.buf[0..self.reader.IO.seek]);
-        self.reader.clear();
-        self.writer.IO.end += self.reader.IO.seek;
+        return self.pack(str);
+    }
+
+    pub fn packFirst(self: *Buffalo, size: usize, str: []const u8) *Buffalo {
+        if (size > self.buffer.len) { // Total buffalo capacity is buffalo.pack.len * 2
+            return self.pack(str[0..self.buffer.len]);
+        }
+        return self.pack(str[0..size]);
+    }
+
+    fn pack(self: *Buffalo, str: []const u8) *Buffalo {
+        self.count += str.len;
+        std.debug.assert(self.buffer.len >= str.len);
+        @memcpy(self.buffer, str);
         return self;
     }
 
-    pub fn write(self: *Buffalo) *Buffalo {
-        _ = self.writer.IO.write(self.writer.buf[0..self.writer.IO.end]) catch 0;
-        self.reader.IO.seek = 0;
+    pub fn consumePack(self: *Buffalo) *Buffalo {
+        defer self.count = 0;
+        return self.consumeThis(self.buffer[0..self.count]);
+    }
+
+    pub fn consumePackPlus(self: *Buffalo, cs: []const u8) *Buffalo {
+        defer self.count = 0;
+        return self.consumeThis(self.buffer[0..self.count]).consumeBytes(cs);
+    }
+
+    pub fn consumeThis(self: *Buffalo, str: []const u8) *Buffalo {
+        if (str.len > self.buffer.len * 2) { // Total buffalo capacity is buffalo.pack.len * 2
+            self.rider.IO.writeAll(str) catch {};
+            return self;
+        }
+        var reader: Reader = .init(str);
+        while (reader.IO.readSliceShort(self.buffer)) |bytesRead| {
+            if (bytesRead == 0) break;
+            if (bytesRead < self.buffer.len and bytesRead > 0) {
+                _ = self.tinyPush(bytesRead);
+                break;
+            }
+            _ = self.push();
+        } else |_| {}
         return self;
     }
 
-    pub fn print(self: *Buffalo, lbl: ?[]const u8) *Buffalo {
-        if (lbl) |l| {
-            self.writer.IO.print("{s}:{s}", .{ l, self.writer.buf }) catch {};
-        } else {
-            self.writer.IO.print("Anon_Print: {s}", .{self.writer.buf}) catch {};
+    pub fn consumeFirst(self: *Buffalo, count: usize, str: []const u8) *Buffalo {
+        if (count < str.len) {
+            return self.consumeThis(str[0..count]);
+        } else return self.consumeThis(str);
+    }
+
+    pub fn consumeByte(self: *Buffalo, c: u8) *Buffalo {
+        _ = self.rider.IO.writeByte(c) catch 0;
+        return self;
+    }
+
+    pub fn consumeBytes(self: *Buffalo, c: []const u8) *Buffalo {
+        for (c) |codepoint| {
+            _ = self.rider.IO.writeByte(codepoint) catch 0;
         }
         return self;
     }
 
-    pub fn flush(self: *Buffalo) void {
-        self.writer.IO.flush() catch {};
+    pub fn consumeBytesXTimes(self: *Buffalo, cs: []const u8, rep: usize) *Buffalo {
+        if (rep > 0) {
+            for (0..rep) |_| {
+                for (cs) |c| {
+                    _ = self.rider.IO.writeByte(c) catch 0;
+                }
+            }
+            return self;
+        }
+        for (cs[0 .. cs.len - 1]) |c| {
+            _ = self.rider.IO.writeByte(c) catch 0;
+        }
+        return self.consumeByte(cs[cs.len - 1]);
+    }
+
+    pub fn inspect(self: *Buffalo) *Buffalo {
+        std.debug.print("---------------<Inspection>---------------\n\n", .{});
+        std.debug.print("Buffalo: start::[`{s}`]::end\n", .{self.buffer[0..self.count]});
+        std.debug.print("\n", .{});
+        std.debug.print("Rider: start::[`{s}`]::end\n", .{self.rider.buf});
+        std.debug.print("\n---------------</Inspection>---------------\n\n", .{});
+        return self;
+    }
+
+    pub fn rest(self: *Buffalo) void {
+        _ = self;
+    }
+
+    pub fn newPack(self: *Buffalo, size: usize, packer: std.mem.Allocator) *Buffalo {
+        self.buffer = packer.alloc(u8, @divFloor(size, 2)) catch undefined;
+        self.rider.buf = packer.alloc(u8, @divFloor(size, 2)) catch undefined;
+        self.rider.IO.end = 0;
+        return self;
+    }
+
+    pub fn dropOff(self: *Buffalo) *Buffalo {
+        _ = self.rider.IO.flush() catch {};
+        @memset(self.buffer.ptr[0..self.buffer.len], ' ');
+        @memset(self.rider.IO.buffer, ' ');
+        return self;
+    }
+
+    fn tinyPush(self: *Buffalo, offset: usize) *Buffalo {
+        _ = self.rider.IO.write(self.buffer[0..offset]) catch 0;
+        return self;
+    }
+
+    fn push(self: *Buffalo) *Buffalo {
+        _ = self.rider.IO.write(self.buffer) catch 0;
+        return self;
     }
 };
