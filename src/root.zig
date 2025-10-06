@@ -27,25 +27,45 @@ const Writer = struct {
 pub const Buffalo = struct {
     buffer: []u8 = undefined,
     rider: Writer = undefined,
+    fault: ?anyerror,
 
-    pub inline fn init(comptime size: usize, a: std.mem.Allocator) Buffalo {
-        _ = a; // Todo implement use of allocator -- realizing that there's no real benefit 'cheating' here
-        var buf: [size]u8 = undefined;
-        var writer = Writer.init(&buf);
+    pub inline fn init(buffer: []u8) Buffalo {
+        var writer = Writer.init(buffer);
         return Buffalo{
             .rider = writer,
             .buffer = writer.buf,
+            .fault = null,
         };
     }
 
-    pub fn inspect(self: *Buffalo) *Buffalo {
-        std.debug.print("{s}", .{self.buffer});
+    inline fn faulted(self: *Buffalo) bool {
+        return (self.fault != null);
+    }
+
+    fn getFaultStatus(self: *Buffalo) !void {
+        if (self.fault) |err| {
+            return err;
+        }
+    }
+
+    fn newFault(self: *Buffalo, err: anyerror) *Buffalo {
+        if (self.faulted()) return self;
+        self.fault = err;
+        return self;
+    }
+
+    pub fn inspectBuffer(self: *Buffalo) *Buffalo {
+        if (self.faulted()) return self;
+        std.debug.print("{s}, {any}\n", .{ self.buffer, self.faulted() });
         return self;
     }
 
     pub fn pull(self: *Buffalo, str: []const u8) *Buffalo {
+        if (self.faulted()) return self;
         if (str.len > (self.buffer.len - self.rider.IO.end)) {
-            self.rider.IO.writeAll(str) catch {};
+            self.rider.IO.writeAll(str) catch |err| {
+                return self.newFault(err);
+            };
             return self;
         }
         var reader = std.Io.Reader.fixed(str);
@@ -56,25 +76,29 @@ pub const Buffalo = struct {
         return self;
     }
 
-    pub fn pullFrom(self: *Buffalo, count: usize, str: []const u8) *Buffalo {
+    pub fn pullFromXToEnd(self: *Buffalo, count: usize, str: []const u8) *Buffalo {
+        if (self.faulted()) return self;
         if (count < str.len - 1) {
             return self.pull(str[count..]);
         } else return self.pull(str);
     }
 
     pub fn pullLast(self: *Buffalo, count: usize, str: []const u8) *Buffalo {
+        if (self.faulted()) return self;
         if ((count + 1) < str.len) {
             return self.pull(str[str.len - count .. str.len]);
         } else return self.pull(str);
     }
 
     pub fn pullFirst(self: *Buffalo, count: usize, str: []const u8) *Buffalo {
+        if (self.faulted()) return self;
         if ((count + 1) < str.len) {
             return self.pull(str[0 .. count + 1]);
         } else return self.pull(str);
     }
 
     pub fn pullBetween(self: *Buffalo, l: usize, r: usize, str: []const u8) *Buffalo {
+        if (self.faulted()) return self;
         if (l > r) {
             return self.pull(str[r..l]);
         }
@@ -84,11 +108,15 @@ pub const Buffalo = struct {
     }
 
     pub fn takeByte(self: *Buffalo, c: u8) *Buffalo {
-        _ = self.rider.IO.writeByte(c) catch 0;
+        if (self.faulted()) return self;
+        _ = self.rider.IO.writeByte(c) catch |err| {
+            return self.newFault(err);
+        };
         return self;
     }
 
-    pub fn pullXTimes(self: *Buffalo, cs: []const u8, rep: usize, sep: ?[]const u8) *Buffalo {
+    pub fn pullThenCopy(self: *Buffalo, cs: []const u8, rep: usize, sep: ?[]const u8) *Buffalo {
+        if (self.faulted()) return self;
         if (rep > 0) {
             for (0..rep) |_| {
                 for (cs) |c| {
@@ -106,16 +134,19 @@ pub const Buffalo = struct {
         return self.takeByte(cs[cs.len - 1]); // ...so we can retain interface fluency
     }
 
-    pub fn wait(self: *Buffalo) !void { //Terminate call chain without flushing
-        _ = self;
-    }
-
     pub fn flush(self: *Buffalo) *Buffalo {
         _ = self.rider.IO.flush();
         return self;
     }
 
+    pub fn wait(self: *Buffalo) !void { //Terminate call chain NO flush
+        if (self.faulted()) return self.fault;
+    }
+
     pub fn rest(self: *Buffalo) !void { //Terminate call chain AND flush
-        _ = self.rider.IO.flush() catch {};
+        _ = self.rider.IO.flush() catch |err| {
+            _ = self.newFault(err);
+        };
+        if (self.faulted()) return self.getFaultStatus();
     }
 };

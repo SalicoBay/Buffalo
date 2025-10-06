@@ -1,19 +1,18 @@
 const std = @import("std");
 const Buffalo = @import("buffalo");
 
+const gpa = std.heap.page_allocator;
+var Arena: std.heap.ArenaAllocator = .init(gpa);
+var RingAllocator = std.heap.stackFallback(1024 * 10, Arena.allocator());
+
 pub fn main() !void {
-    // Simple convenience wrapper around Std.Io.Reader/Writers. Instantiates as [size]u8 buffer.
-    // No allocator is needed for the init, as we construct via inline semantics. DO NOT PANIC
-    // No other member functions will *ever* allocate additional memory through inline semantics.
-    // Any member function that accepts a [~]const u8 will implicitly instantiate a stack-local
-    // std.Io.reader.fixed() whose lifetime will naturally end *before* the method return completes.
+    const ring = RingAllocator.get();
 
-    var buffalo: Buffalo.Buffalo = .init(3_000_000); // <-- Initial capacity of the buffalo
+    var buffalo: Buffalo.Buffalo = .init(try ring.alloc(u8, 10)); // <-- Initial capacity of the buffalo
 
     try buffalo
-        .pullXTimes("Yahtzee! ", 3_000, "Yahtzee! ")
-        .wait();
-
-    try buffalo
+        .pullThenCopy("Yahtzee! ", 100, "Yahtzee! ")
+        .pullLast(13, "The quick brown fox jumped over the lazy dog!")
+        // .inspect()
         .rest();
 }
